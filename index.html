@@ -92,7 +92,7 @@ const $ = (id) => document.getElementById(id);
 let curDay = 1;
 
 function esc(t){return (t==null?'':String(t)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function fmtDesc(d){let t=esc(d);t=t.replace(/。/g,'。<br>').replace(/([^>])(⚠|🚨|▸|💡)/g,'$1<br>$2').replace(/(<br>)+/g,'<br>').replace(/^<br>|<br>$/g,'');return t;}
+function fmtDesc(d){let t=esc(d);t=t.replace(/\s*(⚠|🚨|▸|💡|✅)/g,'\n$1');t=t.split(/[。；;\n]+/).map(s=>s.trim()).filter(Boolean).join('<br>');return t;}
 
 function init(){
   $('ttl').textContent = STATE.trip.name;
@@ -152,8 +152,8 @@ function renderItin(){
     const leg = d.map.map((p,i)=>`<span style="white-space:nowrap"><span class="dot" style="background:${kc[p.kind]||'#555'}"></span><b>${i+1}</b> ${esc(p.label)}</span>`).join('');
     h += `<div class="mapwrap"><div id="daymap" class="daymap"></div><div class="maplegend">${leg}</div><div class="mapnote">🟣住宿 🟢景点 🟠餐饮 🔵交通 · 可缩放拖动 · 精确导航见「🧭导航」MapCode</div></div>`;
   }
-  h += `<div class="theme">📍 ${esc(d.theme)}</div>`;
-  if(d.warning) h += `<div class="warn">${esc(d.warning)}</div>`;
+  h += `<div class="theme">📍 ${fmtDesc(d.theme)}</div>`;
+  if(d.warning) h += `<div class="warn">${fmtDesc(d.warning)}</div>`;
   h += '<div class="tl">';
   (d.items||[]).forEach(it=>{
     h += `<div class="item"><div class="time">${esc(it.time)}</div><div class="ic"><div class="t">${esc(it.title)}</div>`+
@@ -198,7 +198,7 @@ function renderHotels(){
   (STATE.hotels||[]).forEach(ho=>{
     h+=`<div class="card"><h3>${esc(ho.name||'')}</h3><div class="meta">`+
        (ho.night?`📅 ${esc(ho.night)}\n`:'')+(ho.room?`🛏 ${esc(ho.room)}\n`:'')+
-       (ho.price?`💴 ${esc(ho.price)}\n`:'')+(ho.note?esc(ho.note):'')+`</div></div>`;
+       (ho.price?`💴 ${esc(ho.price)}\n`:'')+(ho.note?fmtDesc(ho.note):'')+`</div></div>`;
   });
   $('v-hotel').innerHTML=h;
 }
@@ -207,7 +207,7 @@ function renderFood(){
   let h='<div class="sec-title">餐厅推荐（人均≤人民币400元，海胆季/会席例外）</div>';
   (STATE.restaurants||[]).forEach(r=>{
     h+=`<div class="card"><h3>${esc(r.name||'')} <span class="tag">${esc(r.type||'')}</span></h3>`+
-       `<div class="meta"><span class="tag">${esc(r.day||'')}</span><span class="tag">${esc(r.price||'')}</span>\n${esc(r.note||'')}</div></div>`;
+       `<div class="meta"><span class="tag">${esc(r.day||'')}</span><span class="tag">${esc(r.price||'')}</span><br>${fmtDesc(r.note||'')}</div></div>`;
   });
   $('v-food').innerHTML=h;
 }
@@ -229,17 +229,17 @@ function renderBaby(){
   if(st.allergen_done) h += `<div class="meta" style="margin-top:6px;color:#1a7a8a">致敏原已引入：${(st.allergen_done||[]).map(esc).join(' / ')}</div>`;
   if(st.allergen_todo) h += `<div class="meta" style="color:#c0392b">没吃过·别首试：${(st.allergen_todo||[]).map(esc).join(' / ')}</div>`;
   h += '</div>';
-  if(g.iron_rule) h += `<div class="warn">🚨 ${esc(g.iron_rule)}</div>`;
+  if(g.iron_rule) h += `<div class="warn">🚨 ${fmtDesc(g.iron_rule)}</div>`;
   if(g.buy_safe){
     h += '<div class="sec-title">✅ 放心买（对应已吃口味）</div>';
-    g.buy_safe.forEach(b=>{ h += `<div class="card"><h3>${esc(b.cat)}</h3><div class="meta">${esc(b.why||'')}\n👉 ${esc(b.pick||'')}</div></div>`; });
+    g.buy_safe.forEach(b=>{ h += `<div class="card"><h3>${esc(b.cat)}</h3><div class="meta">${fmtDesc(b.why||'')}<br>👉 ${fmtDesc(b.pick||'')}</div></div>`; });
   }
   if(g.avoid){
     h += '<div class="card" style="border-left:4px solid var(--warn)"><h3>⚠ 看成分避开 / 谨慎</h3><div class="meta">'+(g.avoid||[]).map(a=>'· '+esc(a)).join('\n')+'</div></div>';
   }
-  if(g.qty_heat) h += `<div class="card"><h3>📦 数量 & 加热</h3><div class="meta">${esc(g.qty_heat)}</div></div>`;
-  if(g.buy_where) h += `<div class="card"><h3>🛒 哪里买</h3><div class="meta">${esc(g.buy_where)}</div></div>`;
-  if(g.before_departure) h += `<div class="card" style="background:#fff8e8"><h3>💡 出发前在家（可选）</h3><div class="meta">${esc(g.before_departure)}</div></div>`;
+  if(g.qty_heat) h += `<div class="card"><h3>📦 数量 & 加热</h3><div class="meta">${fmtDesc(g.qty_heat)}</div></div>`;
+  if(g.buy_where) h += `<div class="card"><h3>🛒 哪里买</h3><div class="meta">${fmtDesc(g.buy_where)}</div></div>`;
+  if(g.before_departure) h += `<div class="card" style="background:#fff8e8"><h3>💡 出发前在家（可选）</h3><div class="meta">${fmtDesc(g.before_departure)}</div></div>`;
   if(g.source) h += `<div class="meta" style="font-size:11px;color:#999;margin-top:10px">📋 ${esc(g.source)}</div>`;
   $('v-baby').innerHTML = h;
 }
@@ -247,7 +247,7 @@ function renderBaby(){
 function renderFallbacks(){
   let h='<div class="sec-title">天气 / 突发 备选</div>';
   (STATE.fallbacks||[]).forEach(fb=>{
-    h+=`<div class="card"><h3>${esc(fb.trigger||'')}</h3><div class="meta"><b>→ ${esc(fb.action||'')}</b>\n${esc(fb.detail||'')}</div></div>`;
+    h+=`<div class="card"><h3>${esc(fb.trigger||'')}</h3><div class="meta"><b>→ ${esc(fb.action||'')}</b><br>${fmtDesc(fb.detail||'')}</div></div>`;
   });
   $('v-fb').innerHTML=h;
 }
