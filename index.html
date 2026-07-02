@@ -60,6 +60,8 @@ header .sub{font-size:12px;opacity:.85;margin-top:2px}
 .packi.done .pack-text:focus{text-decoration:none;color:#333}
 .pack-del{flex:0 0 auto;width:24px;height:24px;border:none;background:transparent;color:#aaa;border-radius:6px;font-size:19px;line-height:20px;padding:0;margin-top:-2px}
 .pack-del:active{background:#f1eef6;color:#5b4b8a}
+.pack-add{width:100%;border:1px dashed #d8d3e7;background:#faf9fd;color:#5b4b8a;border-radius:8px;padding:7px 10px;margin-top:8px;font-size:12.5px;text-align:left}
+.pack-add:active{background:#f1eef8}
 .sec-title{font-size:13px;font-weight:700;color:var(--accent);margin:14px 2px 8px}
 nav{position:fixed;bottom:0;left:0;right:0;z-index:30;display:flex;background:#fff;border-top:1px solid #e8e8ee;padding-bottom:env(safe-area-inset-bottom)}
 nav button{flex:1;border:none;background:none;padding:8px 0 6px;font-size:10px;color:#999}
@@ -142,6 +144,8 @@ function hashStr(s){let h=2166136261; for(let i=0;i<s.length;i++){h^=s.charCodeA
 function packKey(cat,item){return 'hokkaido-pack:'+hashStr(`${cat}|${item}`);}
 function packDeletedKey(key){return key+':deleted';}
 function packTextKey(key){return key+':text';}
+function packCustomKey(catIndex){return `hokkaido-pack-custom:${catIndex}`;}
+function packCustomItemKey(catIndex,id){return `hokkaido-pack:custom:${catIndex}:${id}`;}
 function loadChecked(key){try{return localStorage.getItem(key)==='1';}catch(e){return false;}}
 function saveChecked(key,checked){try{localStorage.setItem(key,checked?'1':'0');}catch(e){}}
 function loadDeleted(key){try{return localStorage.getItem(packDeletedKey(key))==='1';}catch(e){return false;}}
@@ -156,6 +160,31 @@ function savePackText(key,text,fallback){
     else localStorage.setItem(packTextKey(key),v);
   }catch(e){}
   return v || orig;
+}
+function loadCustomItems(catIndex){
+  try{
+    const raw=localStorage.getItem(packCustomKey(catIndex));
+    const arr=raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter(x=>x&&x.id).map(x=>({id:String(x.id),text:String(x.text||'')})) : [];
+  }catch(e){return [];}
+}
+function saveCustomItems(catIndex,items){try{localStorage.setItem(packCustomKey(catIndex),JSON.stringify(items));}catch(e){}}
+function addCustomItem(catIndex,text){
+  const items=loadCustomItems(catIndex);
+  const id=`${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`;
+  const item={id,text:cleanPackText(text)||'新增行李项'};
+  items.push(item);
+  saveCustomItems(catIndex,items);
+  return {key:packCustomItemKey(catIndex,id),item};
+}
+function removeCustomItem(catIndex,key){
+  const prefix=`hokkaido-pack:custom:${catIndex}:`;
+  const id=String(key||'').startsWith(prefix) ? String(key).slice(prefix.length) : '';
+  if(!id) return false;
+  const items=loadCustomItems(catIndex).filter(x=>x.id!==id);
+  saveCustomItems(catIndex,items);
+  try{localStorage.removeItem(key);localStorage.removeItem(packTextKey(key));localStorage.removeItem(packDeletedKey(key));}catch(e){}
+  return true;
 }
 
 function init(){
@@ -388,7 +417,13 @@ function renderTodos(){
         const txt=loadPackText(key,it||'');
         rows+=`<div class="packi" data-pack-key="${key}" data-pack-cat="${ci}"><input type="checkbox" data-pack-key="${key}" data-pack-cat="${ci}" aria-label="勾选行李项"><div class="pack-text" contenteditable="true" role="textbox" spellcheck="false" data-pack-key="${key}" data-pack-original="${escAttr(it||'')}" aria-label="编辑行李项">${esc(txt)}</div><button class="pack-del" type="button" data-pack-key="${key}" data-pack-cat="${ci}" title="删除此项" aria-label="删除此项">×</button></div>`;
       });
-      if(rows) h+=`<div class="card pack-card" data-pack-cat="${ci}"><h3>${esc(c.cat)} <span class="pack-count" id="pack-count-${ci}"></span></h3><div class="pack-list">${rows}</div></div>`;
+      loadCustomItems(ci).forEach((custom)=>{
+        const key=packCustomItemKey(ci,custom.id);
+        if(loadDeleted(key)) return;
+        const txt=loadPackText(key,custom.text||'新增行李项');
+        rows+=`<div class="packi" data-pack-key="${key}" data-pack-cat="${ci}" data-pack-custom="1"><input type="checkbox" data-pack-key="${key}" data-pack-cat="${ci}" aria-label="勾选行李项"><div class="pack-text" contenteditable="true" role="textbox" spellcheck="false" data-pack-key="${key}" data-pack-original="${escAttr(custom.text||'新增行李项')}" aria-label="编辑行李项">${esc(txt)}</div><button class="pack-del" type="button" data-pack-key="${key}" data-pack-cat="${ci}" title="删除此项" aria-label="删除此项">×</button></div>`;
+      });
+      h+=`<div class="card pack-card" data-pack-cat="${ci}"><h3>${esc(c.cat)} <span class="pack-count" id="pack-count-${ci}"></span></h3><div class="pack-list">${rows}</div><button class="pack-add" type="button" data-pack-cat="${ci}" aria-label="添加行李项">＋ 添加一项</button></div>`;
     });
   }
   $('v-todo').innerHTML=h;
@@ -411,6 +446,16 @@ function syncPackDeletedTools(){
   const n=packDeletedCount();
   btn.classList.toggle('on', n>0);
   const cnt=$('pack-deleted-count'); if(cnt) cnt.textContent = n ? String(n) : '';
+}
+
+function renderPackRow(key,catIndex,text,original,isCustom){
+  const row=document.createElement('div');
+  row.className='packi';
+  row.dataset.packKey=key;
+  row.dataset.packCat=String(catIndex);
+  if(isCustom) row.dataset.packCustom='1';
+  row.innerHTML=`<input type="checkbox" data-pack-key="${key}" data-pack-cat="${catIndex}" aria-label="勾选行李项"><div class="pack-text" contenteditable="true" role="textbox" spellcheck="false" data-pack-key="${key}" data-pack-original="${escAttr(original||'')}" aria-label="编辑行李项">${esc(text)}</div><button class="pack-del" type="button" data-pack-key="${key}" data-pack-cat="${catIndex}" title="删除此项" aria-label="删除此项">×</button>`;
+  return row;
 }
 
 function restoreDeletedPacking(){
@@ -461,13 +506,36 @@ function bindPackingChecks(){
     btn.onclick=(ev)=>{
       ev.preventDefault();
       ev.stopPropagation();
-      saveDeleted(btn.dataset.packKey,true);
       const row=btn.closest('.packi');
+      const isCustom=row&&row.dataset.packCustom==='1';
+      if(isCustom) removeCustomItem(btn.dataset.packCat, btn.dataset.packKey);
+      else saveDeleted(btn.dataset.packKey,true);
       const card=btn.closest('.pack-card');
       if(row) row.remove();
-      if(card && !card.querySelector('.packi')) card.remove();
       syncPackCounts(btn.dataset.packCat);
       syncPackDeletedTools();
+    };
+  });
+  document.querySelectorAll('.pack-add').forEach(btn=>{
+    btn.onclick=()=>{
+      const catIndex=btn.dataset.packCat;
+      const added=addCustomItem(catIndex,'新增行李项');
+      const key=added.key;
+      const text=added.item.text;
+      const row=renderPackRow(key,catIndex,text,text,true);
+      const list=btn.closest('.pack-card').querySelector('.pack-list');
+      list.appendChild(row);
+      bindPackingChecks();
+      const editor=row.querySelector('.pack-text');
+      if(editor){
+        editor.focus();
+        const range=document.createRange();
+        range.selectNodeContents(editor);
+        const sel=window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      syncPackCounts(catIndex);
     };
   });
   const restore=$('pack-restore');
