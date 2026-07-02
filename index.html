@@ -52,10 +52,12 @@ header .sub{font-size:12px;opacity:.85;margin-top:2px}
 .pack-list{margin-top:5px}
 .packi{display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-top:1px solid #f0f0f4;font-size:12.5px;color:var(--sub);line-height:1.55}
 .packi:first-child{border-top:none}
-.pack-label{display:flex;gap:9px;align-items:flex-start;flex:1;min-width:0}
 .packi input{flex:0 0 auto;width:18px;height:18px;margin-top:1px;accent-color:var(--feed)}
-.pack-label span{flex:1;white-space:pre-wrap}
-.packi.done .pack-label span{text-decoration:line-through;color:#999}
+.pack-text{flex:1;min-width:0;white-space:pre-wrap;outline:none;border-radius:6px;padding:1px 4px;margin:-1px -4px;color:var(--sub)}
+.pack-text:focus{background:#fff8e8;box-shadow:inset 0 0 0 1px #ded2f2;color:#333;text-decoration:none}
+.pack-text:empty:before{content:'填写行李项';color:#bbb}
+.packi.done .pack-text{text-decoration:line-through;color:#999}
+.packi.done .pack-text:focus{text-decoration:none;color:#333}
 .pack-del{flex:0 0 auto;width:24px;height:24px;border:none;background:transparent;color:#aaa;border-radius:6px;font-size:19px;line-height:20px;padding:0;margin-top:-2px}
 .pack-del:active{background:#f1eef6;color:#5b4b8a}
 .sec-title{font-size:13px;font-weight:700;color:var(--accent);margin:14px 2px 8px}
@@ -133,15 +135,28 @@ const $ = (id) => document.getElementById(id);
 let curDay = 1;
 
 function esc(t){return (t==null?'':String(t)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function escAttr(t){return esc(t).replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function fmtLine(s){s=s.replace(/^(一句话|地点|导航|地址|怎么做|关键|营业|费用|耗时|停车|宝宝|注意|可选|备选|路线|起点|终点|车程|距离|高速费|推荐路线)(：)/,'<b class="lb">$1$2</b>');return s.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');}
 function fmtDesc(d){let t=esc(d);t=t.replace(/\s*(⚠|🚨|▸|💡|✅)/g,'\n$1');return t.split(/[。；;\n]+/).map(s=>s.trim()).filter(Boolean).map(fmtLine).join('<br>');}
 function hashStr(s){let h=2166136261; for(let i=0;i<s.length;i++){h^=s.charCodeAt(i); h=Math.imul(h,16777619);} return (h>>>0).toString(36);}
 function packKey(cat,item){return 'hokkaido-pack:'+hashStr(`${cat}|${item}`);}
 function packDeletedKey(key){return key+':deleted';}
+function packTextKey(key){return key+':text';}
 function loadChecked(key){try{return localStorage.getItem(key)==='1';}catch(e){return false;}}
 function saveChecked(key,checked){try{localStorage.setItem(key,checked?'1':'0');}catch(e){}}
 function loadDeleted(key){try{return localStorage.getItem(packDeletedKey(key))==='1';}catch(e){return false;}}
 function saveDeleted(key,deleted){try{if(deleted)localStorage.setItem(packDeletedKey(key),'1');else localStorage.removeItem(packDeletedKey(key));}catch(e){}}
+function cleanPackText(t){return String(t||'').replace(/\s+/g,' ').trim();}
+function loadPackText(key,fallback){try{const v=localStorage.getItem(packTextKey(key)); return v==null ? String(fallback||'') : v;}catch(e){return String(fallback||'');}}
+function savePackText(key,text,fallback){
+  const orig=String(fallback||'');
+  const v=cleanPackText(text);
+  try{
+    if(!v || v===orig) localStorage.removeItem(packTextKey(key));
+    else localStorage.setItem(packTextKey(key),v);
+  }catch(e){}
+  return v || orig;
+}
 
 function init(){
   $('ttl').textContent = STATE.trip.name;
@@ -370,7 +385,8 @@ function renderTodos(){
       (c.items||[]).forEach((it)=>{
         const key=packKey(c.cat||'', it||'');
         if(loadDeleted(key)) return;
-        rows+=`<div class="packi" data-pack-key="${key}" data-pack-cat="${ci}"><label class="pack-label"><input type="checkbox" data-pack-key="${key}" data-pack-cat="${ci}"><span>${esc(it)}</span></label><button class="pack-del" type="button" data-pack-key="${key}" data-pack-cat="${ci}" title="删除此项" aria-label="删除此项">×</button></div>`;
+        const txt=loadPackText(key,it||'');
+        rows+=`<div class="packi" data-pack-key="${key}" data-pack-cat="${ci}"><input type="checkbox" data-pack-key="${key}" data-pack-cat="${ci}" aria-label="勾选行李项"><div class="pack-text" contenteditable="true" role="textbox" spellcheck="false" data-pack-key="${key}" data-pack-original="${escAttr(it||'')}" aria-label="编辑行李项">${esc(txt)}</div><button class="pack-del" type="button" data-pack-key="${key}" data-pack-cat="${ci}" title="删除此项" aria-label="删除此项">×</button></div>`;
       });
       if(rows) h+=`<div class="card pack-card" data-pack-cat="${ci}"><h3>${esc(c.cat)} <span class="pack-count" id="pack-count-${ci}"></span></h3><div class="pack-list">${rows}</div></div>`;
     });
@@ -425,6 +441,20 @@ function bindPackingChecks(){
     input.onchange=()=>{
       saveChecked(input.dataset.packKey, input.checked);
       syncPackCounts(input.dataset.packCat);
+    };
+  });
+  document.querySelectorAll('.pack-text').forEach(el=>{
+    const persist=()=>{
+      const saved=savePackText(el.dataset.packKey, el.textContent, el.dataset.packOriginal||'');
+      if(cleanPackText(el.textContent)!==saved) el.textContent=saved;
+    };
+    el.oninput=()=>{ savePackText(el.dataset.packKey, el.textContent, el.dataset.packOriginal||''); };
+    el.onblur=persist;
+    el.onkeydown=(ev)=>{ if(ev.key==='Enter'){ ev.preventDefault(); el.blur(); } };
+    el.onpaste=(ev)=>{
+      ev.preventDefault();
+      const text=(ev.clipboardData||window.clipboardData).getData('text/plain');
+      document.execCommand('insertText', false, cleanPackText(text));
     };
   });
   document.querySelectorAll('.pack-del').forEach(btn=>{
