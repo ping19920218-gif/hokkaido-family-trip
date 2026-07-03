@@ -152,6 +152,7 @@ const PACK_SYNC_CFG = {
   settingKey: 'packingHokkaido2026Json'
 };
 const PACK_BRIDGE_URL = 'https://baby-tracker-d6g6gqokjc671997c-1320742857.tcloudbaseapp.com/hokkaido-family-trip/cloudbase-bridge.html';
+const PACK_APP_URL = 'https://baby-tracker-d6g6gqokjc671997c-1320742857.tcloudbaseapp.com/hokkaido-family-trip/index.html';
 const PACK_BRIDGE_ORIGIN = (()=>{try{return new URL(PACK_BRIDGE_URL).origin;}catch(e){return '';}})();
 const PACK_PENDING_KEY = 'hokkaido-pack-sync-pending';
 const PACK_DEVICE_KEY = 'hokkaido-pack-device';
@@ -236,6 +237,36 @@ function setPackSyncStatus(text,level){
 function packCanUseBridge(){
   return !!PACK_BRIDGE_ORIGIN && location.origin !== PACK_BRIDGE_ORIGIN;
 }
+function packCloudbaseSyncUrl(mode){
+  const payload={
+    version:1,
+    mode:mode||'pull',
+    items:readLocalPackState(),
+    pending:pendingPackChanges(),
+    updatedBy:packDeviceId(),
+    createdAt:new Date().toISOString()
+  };
+  const json=JSON.stringify(payload);
+  const bytes=encodeURIComponent(json).replace(/%([0-9A-F]{2})/g,(_,p)=>String.fromCharCode(parseInt(p,16)));
+  const encoded=btoa(bytes).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  return PACK_APP_URL+'?v=91&handoff='+encoded;
+}
+function decodePackCloudbaseHandoff(raw){
+  if(!raw) return null;
+  let s=String(raw).replace(/-/g,'+').replace(/_/g,'/');
+  while(s.length%4) s+='=';
+  const bytes=atob(s);
+  const json=decodeURIComponent(Array.prototype.map.call(bytes,ch=>'%'+('00'+ch.charCodeAt(0).toString(16)).slice(-2)).join(''));
+  const payload=JSON.parse(json);
+  return payload&&typeof payload==='object' ? payload : null;
+}
+function openPackCloudbaseSyncPage(){
+  const localItems=readLocalPackState();
+  const pending=pendingPackChanges();
+  const mode=(Object.keys(localItems).length||Object.keys(pending).length) ? 'push' : 'pull';
+  setPackSyncStatus(mode==='push'?'正在转到云端保存…':'正在转到云端读取…','pending');
+  location.href=packCloudbaseSyncUrl(mode);
+}
 function packBridgeTarget(){
   if(PACK_SYNC.bridgeWindow && !PACK_SYNC.bridgeWindow.closed) return PACK_SYNC.bridgeWindow;
   if(PACK_SYNC.bridge && PACK_SYNC.bridge.contentWindow) return PACK_SYNC.bridge.contentWindow;
@@ -249,7 +280,7 @@ function preparePackBridgeInteractive(){
   }
   try{
     PACK_SYNC.bridgeWindow=window.open(
-      PACK_BRIDGE_URL+'?v=90&mode=popup&ts='+Date.now(),
+      PACK_BRIDGE_URL+'?v=91&mode=popup&ts='+Date.now(),
       'hokkaidoPackCloudBridge',
       'popup,width=430,height=620'
     );
@@ -313,7 +344,7 @@ async function ensurePackBridge(){
         document.body.appendChild(frame);
         PACK_SYNC.bridge=frame;
       }
-      frame.src=PACK_BRIDGE_URL+'?v=90&ts='+Date.now();
+      frame.src=PACK_BRIDGE_URL+'?v=91&ts='+Date.now();
     }
     timer=setTimeout(()=>{
       if(done) return;
@@ -388,6 +419,41 @@ async function saveCloudPackState(items){
   await packCloudCall('setSetting',{key:PACK_SYNC_CFG.settingKey,value:JSON.stringify(value)});
   return value;
 }
+async function handlePackCloudbaseHandoff(){
+  if(packCanUseBridge()) return false;
+  const params=new URLSearchParams(location.search||'');
+  const raw=params.get('handoff');
+  if(!raw) return false;
+  try{
+    const cleanUrl=location.pathname+(params.has('v')?'?v='+encodeURIComponent(params.get('v')):'');
+    history.replaceState(null,'',cleanUrl);
+  }catch(e){}
+  try{
+    const payload=decodePackCloudbaseHandoff(raw);
+    if(!payload) return false;
+    if(payload.mode==='push'){
+      setPackSyncStatus('正在保存手机清单到云端…','pending');
+      const items={};
+      Object.entries(payload.items||{}).forEach(([k,v])=>{
+        if(isPackingStorageKey(k) && v!=null) items[k]=String(v);
+      });
+      applyCloudPackState(items,true);
+      await saveCloudPackState(items);
+      savePendingPackChanges({});
+      setPackSyncStatus(`已上传到云端 ${packNowLabel()}`,'ok');
+      return true;
+    }
+    setPackSyncStatus('正在从云端读取…','pending');
+    const data=await fetchCloudPackState();
+    applyCloudPackState(data.items||{},true);
+    setPackSyncStatus(`已云同步 ${packNowLabel()}`,'ok');
+    return true;
+  }catch(e){
+    console.warn('[pack-sync] handoff failed', e);
+    setPackSyncStatus('云同步接力失败，请再点一次','err');
+    return true;
+  }
+}
 function applyCloudPackState(items,prune){
   const keep=new Set(Object.keys(items||{}).filter(isPackingStorageKey));
   PACK_SYNC.applying=true;
@@ -457,6 +523,11 @@ async function flushPackCloudPending(){
 }
 async function syncPackCloudNow(manual){
   if(!STATE.packing||!STATE.packing.length) return;
+  if(packCanUseBridge()){
+    if(manual) openPackCloudbaseSyncPage();
+    else setPackSyncStatus('点云同步保存到云端','pending');
+    return;
+  }
   if(manual){
     setPackSyncStatus('正在同步…','pending');
     preparePackBridgeInteractive();
@@ -913,7 +984,7 @@ function renderSos(){
 }
 
 init();
-startPackCloudSync();
+handlePackCloudbaseHandoff().finally(()=>startPackCloudSync());
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
 </script>
 </body>
