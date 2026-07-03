@@ -192,11 +192,45 @@ function readLocalPackState(){
   });
   return items;
 }
+function packIsoNow(){
+  return new Date().toISOString();
+}
+function packTimestampMs(ts){
+  const n=Date.parse(ts||'');
+  return Number.isFinite(n) ? n : 0;
+}
+function packChangeEntry(value,ts,by){
+  return {value:value==null?null:String(value),ts:ts||packIsoNow(),by:by||packDeviceId()};
+}
+function normalizePackChangeEntry(entry,fallbackTs){
+  if(entry&&typeof entry==='object'&&!Array.isArray(entry)&&Object.prototype.hasOwnProperty.call(entry,'value')){
+    return packChangeEntry(entry.value,entry.ts||fallbackTs,entry.by);
+  }
+  return packChangeEntry(entry,fallbackTs||packIsoNow(),packDeviceId());
+}
+function normalizePackPendingObject(obj,fallbackTs){
+  const out={};
+  let dirty=false;
+  if(!obj||typeof obj!=='object'||Array.isArray(obj)) return {changes:out,dirty};
+  Object.entries(obj).forEach(([k,v])=>{
+    if(!isPackingStorageKey(k)) return;
+    out[k]=normalizePackChangeEntry(v,fallbackTs);
+    if(!v||typeof v!=='object'||Array.isArray(v)||!Object.prototype.hasOwnProperty.call(v,'value')) dirty=true;
+  });
+  return {changes:out,dirty};
+}
+function packEntriesSame(a,b){
+  const left=normalizePackChangeEntry(a);
+  const right=normalizePackChangeEntry(b,left.ts);
+  return left.value===right.value&&left.ts===right.ts&&left.by===right.by;
+}
 function pendingPackChanges(){
   try{
     const raw=localStorage.getItem(PACK_PENDING_KEY);
     const obj=raw ? JSON.parse(raw) : {};
-    return obj&&typeof obj==='object'&&!Array.isArray(obj) ? obj : {};
+    const normalized=normalizePackPendingObject(obj);
+    if(normalized.dirty) savePendingPackChanges(normalized.changes);
+    return normalized.changes;
   }catch(e){return {};}
 }
 function savePendingPackChanges(changes){
@@ -209,7 +243,7 @@ function savePendingPackChanges(changes){
 function clearFlushedPackChanges(flushed){
   const current=pendingPackChanges();
   Object.entries(flushed||{}).forEach(([k,v])=>{
-    if(Object.prototype.hasOwnProperty.call(current,k) && current[k]===v) delete current[k];
+    if(Object.prototype.hasOwnProperty.call(current,k) && packEntriesSame(current[k],v)) delete current[k];
   });
   savePendingPackChanges(current);
   return current;
@@ -239,17 +273,17 @@ function packCanUseBridge(){
 }
 function packCloudbaseSyncUrl(mode){
   const payload={
-    version:1,
+    version:2,
     mode:mode||'pull',
     items:readLocalPackState(),
     pending:pendingPackChanges(),
     updatedBy:packDeviceId(),
-    createdAt:new Date().toISOString()
+    createdAt:packIsoNow()
   };
   const json=JSON.stringify(payload);
   const bytes=encodeURIComponent(json).replace(/%([0-9A-F]{2})/g,(_,p)=>String.fromCharCode(parseInt(p,16)));
   const encoded=btoa(bytes).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  return PACK_APP_URL+'?v=95&handoff='+encoded;
+  return PACK_APP_URL+'?v=96&handoff='+encoded;
 }
 function decodePackCloudbaseHandoff(raw){
   if(!raw) return null;
@@ -261,9 +295,8 @@ function decodePackCloudbaseHandoff(raw){
   return payload&&typeof payload==='object' ? payload : null;
 }
 function openPackCloudbaseSyncPage(){
-  const localItems=readLocalPackState();
   const pending=pendingPackChanges();
-  const mode=(Object.keys(localItems).length||Object.keys(pending).length) ? 'push' : 'pull';
+  const mode=Object.keys(pending).length ? 'push' : 'pull';
   setPackSyncStatus(mode==='push'?'正在转到云端保存…':'正在转到云端读取…','pending');
   location.href=packCloudbaseSyncUrl(mode);
 }
@@ -280,7 +313,7 @@ function preparePackBridgeInteractive(){
   }
   try{
     PACK_SYNC.bridgeWindow=window.open(
-      PACK_BRIDGE_URL+'?v=95&mode=popup&ts='+Date.now(),
+      PACK_BRIDGE_URL+'?v=96&mode=popup&ts='+Date.now(),
       'hokkaidoPackCloudBridge',
       'popup,width=430,height=620'
     );
@@ -344,7 +377,7 @@ async function ensurePackBridge(){
         document.body.appendChild(frame);
         PACK_SYNC.bridge=frame;
       }
-      frame.src=PACK_BRIDGE_URL+'?v=95&ts='+Date.now();
+      frame.src=PACK_BRIDGE_URL+'?v=96&ts='+Date.now();
     }
     timer=setTimeout(()=>{
       if(done) return;
@@ -405,17 +438,120 @@ async function packCloudCall(op,extra){
 }
 async function fetchCloudPackState(){
   const data=await packCloudCall('getSetting',{key:PACK_SYNC_CFG.settingKey});
-  if(typeof data==='string'){
-    try{
-      const parsed=JSON.parse(data);
-      if(parsed&&parsed.items&&typeof parsed.items==='object') return parsed;
-    }catch(e){}
-  }
-  if(data&&data.items&&typeof data.items==='object') return data;
-  return {version:1,items:{},updatedAt:'',updatedBy:''};
+  return normalizeCloudPackState(data);
 }
-async function saveCloudPackState(items){
-  const value={version:1,items:items||{},updatedAt:new Date().toISOString(),updatedBy:packDeviceId()};
+function normalizeCloudPackState(raw){
+  let data=raw;
+  if(data&&typeof data==='object'&&typeof data.value==='string'&&!data.items) data=data.value;
+  if(typeof data==='string'){
+    try{ data=JSON.parse(data); }catch(e){ data={}; }
+  }
+  if(!data||typeof data!=='object'||Array.isArray(data)) data={};
+  const items={};
+  const meta={};
+  const fallbackTs=String(data.updatedAt||'');
+  const fallbackBy=String(data.updatedBy||'');
+  Object.entries(data.items||{}).forEach(([k,v])=>{
+    if(isPackingStorageKey(k)&&v!=null) items[k]=String(v);
+  });
+  Object.entries(data.meta||{}).forEach(([k,v])=>{
+    if(!isPackingStorageKey(k)||!v||typeof v!=='object'||Array.isArray(v)) return;
+    meta[k]={ts:String(v.ts||fallbackTs),by:String(v.by||fallbackBy),deleted:!!v.deleted};
+  });
+  Object.keys(items).forEach(k=>{
+    if(!meta[k]) meta[k]={ts:fallbackTs,by:fallbackBy,deleted:false};
+    else meta[k].deleted=false;
+  });
+  Object.entries(meta).forEach(([k,v])=>{
+    if(v.deleted) delete items[k];
+  });
+  return {version:2,items,meta,updatedAt:fallbackTs,updatedBy:fallbackBy};
+}
+function packCloudHasAny(cloud){
+  const data=normalizeCloudPackState(cloud);
+  return !!(Object.keys(data.items).length||Object.keys(data.meta).length);
+}
+function makeCloudPackState(items,meta,updatedBy){
+  const cleanItems={};
+  const cleanMeta={};
+  const now=packIsoNow();
+  Object.entries(items||{}).forEach(([k,v])=>{
+    if(isPackingStorageKey(k)&&v!=null) cleanItems[k]=String(v);
+  });
+  const keys=new Set([...Object.keys(cleanItems),...Object.keys(meta||{})]);
+  keys.forEach(k=>{
+    if(!isPackingStorageKey(k)) return;
+    const m=(meta&&meta[k])||{};
+    const exists=Object.prototype.hasOwnProperty.call(cleanItems,k);
+    cleanMeta[k]={ts:String(m.ts||now),by:String(m.by||updatedBy||packDeviceId()),deleted:exists?false:!!m.deleted};
+  });
+  return {version:2,items:cleanItems,meta:cleanMeta,updatedAt:now,updatedBy:updatedBy||packDeviceId()};
+}
+function mergePackPendingIntoCloud(cloud,pending){
+  const base=normalizeCloudPackState(cloud);
+  const normalized=normalizePackPendingObject(pending).changes;
+  const items={...(base.items||{})};
+  const meta={...(base.meta||{})};
+  const applied={};
+  const skipped={};
+  Object.entries(normalized).forEach(([k,entry])=>{
+    if(!isPackingStorageKey(k)) return;
+    const current=meta[k]||{};
+    const incomingMs=packTimestampMs(entry.ts);
+    const currentMs=packTimestampMs(current.ts);
+    if(!current.ts||incomingMs>=currentMs){
+      if(entry.value==null){
+        delete items[k];
+        meta[k]={ts:entry.ts,by:entry.by,deleted:true};
+      }else{
+        items[k]=String(entry.value);
+        meta[k]={ts:entry.ts,by:entry.by,deleted:false};
+      }
+      applied[k]=entry;
+    }else{
+      skipped[k]=entry;
+    }
+  });
+  return {state:makeCloudPackState(items,meta,packDeviceId()),applied,skipped};
+}
+function splitPackPendingByCloud(cloud,pending){
+  const latest=normalizeCloudPackState(cloud);
+  const normalized=normalizePackPendingObject(pending).changes;
+  const verified={};
+  const retry={};
+  Object.entries(normalized).forEach(([k,entry])=>{
+    const current=latest.meta[k];
+    if(!current){
+      retry[k]=entry;
+      return;
+    }
+    const currentMs=packTimestampMs(current.ts);
+    const entryMs=packTimestampMs(entry.ts);
+    if(currentMs>entryMs){
+      verified[k]=entry;
+      return;
+    }
+    if(currentMs<entryMs){
+      retry[k]=entry;
+      return;
+    }
+    if(entry.value==null){
+      if(current.deleted||!Object.prototype.hasOwnProperty.call(latest.items,k)) verified[k]=entry;
+      else retry[k]=entry;
+    }else if(!current.deleted&&latest.items[k]===String(entry.value)){
+      verified[k]=entry;
+    }else{
+      retry[k]=entry;
+    }
+  });
+  return {verified,retry,latest};
+}
+function packSleep(ms){
+  return new Promise(resolve=>setTimeout(resolve,ms));
+}
+async function saveCloudPackState(state){
+  const normalized=normalizeCloudPackState(state);
+  const value=makeCloudPackState(normalized.items,normalized.meta,packDeviceId());
   await packCloudCall('setSetting',{key:PACK_SYNC_CFG.settingKey,value:JSON.stringify(value)});
   return value;
 }
@@ -433,14 +569,28 @@ async function handlePackCloudbaseHandoff(){
     if(!payload) return false;
     if(payload.mode==='push'){
       setPackSyncStatus('正在保存手机清单到云端…','pending');
-      const items={};
-      Object.entries(payload.items||{}).forEach(([k,v])=>{
-        if(isPackingStorageKey(k) && v!=null) items[k]=String(v);
-      });
-      applyCloudPackState(items,true);
-      await saveCloudPackState(items);
-      savePendingPackChanges({});
-      setPackSyncStatus(`已上传到云端 ${packNowLabel()}`,'ok');
+      const pending=normalizePackPendingObject(payload.pending||{},payload.createdAt).changes;
+      let pushed=false;
+      if(Object.keys(pending).length){
+        savePendingPackChanges({...pendingPackChanges(),...pending});
+        pushed=await flushPackCloudPending();
+      }else{
+        const cloud=await fetchCloudPackState();
+        const localItems={};
+        Object.entries(payload.items||{}).forEach(([k,v])=>{
+          if(isPackingStorageKey(k)&&v!=null) localItems[k]=String(v);
+        });
+        if(!packCloudHasAny(cloud)&&Object.keys(localItems).length){
+          const bootstrap={};
+          Object.entries(localItems).forEach(([k,v])=>{ bootstrap[k]=packChangeEntry(v,payload.createdAt,payload.updatedBy); });
+          savePendingPackChanges(bootstrap);
+          pushed=await flushPackCloudPending();
+        }else{
+          applyCloudPackState(cloud.items||{},true);
+        }
+      }
+      if(pushed) setPackSyncStatus(`已上传到云端 ${packNowLabel()}`,'ok');
+      else if(!Object.keys(pendingPackChanges()).length) setPackSyncStatus(`已云同步 ${packNowLabel()}`,'ok');
       return true;
     }
     setPackSyncStatus('正在从云端读取…','pending');
@@ -478,8 +628,9 @@ function applyCloudPackState(items,prune){
 function queuePackCloudPatch(changes){
   if(PACK_SYNC.applying) return;
   const filtered={};
+  const ts=packIsoNow();
   Object.entries(changes||{}).forEach(([k,v])=>{
-    if(isPackingStorageKey(k)) filtered[k]=v==null?null:String(v);
+    if(isPackingStorageKey(k)) filtered[k]=packChangeEntry(v,ts,packDeviceId());
   });
   if(!Object.keys(filtered).length) return;
   const pending={...pendingPackChanges(),...filtered};
@@ -496,21 +647,24 @@ async function flushPackCloudPending(){
   setPackSyncStatus('正在同步…','pending');
   try{
     const cloud=await fetchCloudPackState();
-    const items={...(cloud.items||{})};
-    Object.entries(changes).forEach(([k,v])=>{
-      if(!isPackingStorageKey(k)) return;
-      if(v==null) delete items[k];
-      else items[k]=String(v);
-    });
-    const data=await saveCloudPackState(items);
-    const remaining=clearFlushedPackChanges(changes);
+    const merged=mergePackPendingIntoCloud(cloud,changes);
+    await saveCloudPackState(merged.state);
+    await packSleep(300);
+    let split=splitPackPendingByCloud(await fetchCloudPackState(),changes);
+    if(Object.keys(split.retry).length){
+      const retryMerged=mergePackPendingIntoCloud(split.latest,split.retry);
+      await saveCloudPackState(retryMerged.state);
+      await packSleep(450);
+      split=splitPackPendingByCloud(await fetchCloudPackState(),changes);
+    }
+    const remaining=clearFlushedPackChanges(split.verified);
     if(Object.keys(remaining).length){
       setPackSyncStatus('还有新改动待同步','pending');
       if(PACK_SYNC.timer) clearTimeout(PACK_SYNC.timer);
       PACK_SYNC.timer=setTimeout(()=>{ flushPackCloudPending().catch(()=>{}); },350);
       return false;
     }
-    applyCloudPackState(data.items||{},true);
+    applyCloudPackState(split.latest.items||{},true);
     setPackSyncStatus(`已云同步 ${packNowLabel()}`,'ok');
     return true;
   }catch(e){
@@ -539,7 +693,7 @@ async function syncPackCloudNow(manual){
     const data=await fetchCloudPackState();
     const cloudItems=data.items||{};
     const localItems=readLocalPackState();
-    if(!Object.keys(cloudItems).length && Object.keys(localItems).length){
+    if(!packCloudHasAny(data) && Object.keys(localItems).length){
       queuePackCloudPatch(localItems);
       await flushPackCloudPending();
     }else{
