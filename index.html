@@ -283,7 +283,7 @@ function packCloudbaseSyncUrl(mode){
   const json=JSON.stringify(payload);
   const bytes=encodeURIComponent(json).replace(/%([0-9A-F]{2})/g,(_,p)=>String.fromCharCode(parseInt(p,16)));
   const encoded=btoa(bytes).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  return PACK_APP_URL+'?v=96&handoff='+encoded;
+  return PACK_APP_URL+'?v=97&handoff='+encoded;
 }
 function decodePackCloudbaseHandoff(raw){
   if(!raw) return null;
@@ -313,7 +313,7 @@ function preparePackBridgeInteractive(){
   }
   try{
     PACK_SYNC.bridgeWindow=window.open(
-      PACK_BRIDGE_URL+'?v=96&mode=popup&ts='+Date.now(),
+      PACK_BRIDGE_URL+'?v=97&mode=popup&ts='+Date.now(),
       'hokkaidoPackCloudBridge',
       'popup,width=430,height=620'
     );
@@ -377,7 +377,7 @@ async function ensurePackBridge(){
         document.body.appendChild(frame);
         PACK_SYNC.bridge=frame;
       }
-      frame.src=PACK_BRIDGE_URL+'?v=96&ts='+Date.now();
+      frame.src=PACK_BRIDGE_URL+'?v=97&ts='+Date.now();
     }
     timer=setTimeout(()=>{
       if(done) return;
@@ -487,6 +487,15 @@ function makeCloudPackState(items,meta,updatedBy){
   });
   return {version:2,items:cleanItems,meta:cleanMeta,updatedAt:now,updatedBy:updatedBy||packDeviceId()};
 }
+function makeCloudPackStateFromLocalItems(items,ts,by){
+  const meta={};
+  const stamp=ts||packIsoNow();
+  const device=by||packDeviceId();
+  Object.entries(items||{}).forEach(([k,v])=>{
+    if(isPackingStorageKey(k)&&v!=null) meta[k]={ts:stamp,by:device,deleted:false};
+  });
+  return makeCloudPackState(items,meta,device);
+}
 function mergePackPendingIntoCloud(cloud,pending){
   const base=normalizeCloudPackState(cloud);
   const normalized=normalizePackPendingObject(pending).changes;
@@ -567,6 +576,22 @@ async function handlePackCloudbaseHandoff(){
   try{
     const payload=decodePackCloudbaseHandoff(raw);
     if(!payload) return false;
+    if(payload.mode==='replace'){
+      setPackSyncStatus('正在用本机清单更新云端…','pending');
+      const items={};
+      Object.entries(payload.items||{}).forEach(([k,v])=>{
+        if(isPackingStorageKey(k)&&v!=null) items[k]=String(v);
+      });
+      if(Object.keys(items).length){
+        const data=await saveCloudPackState(makeCloudPackStateFromLocalItems(items,payload.createdAt,payload.updatedBy));
+        applyCloudPackState(data.items||{},true);
+        savePendingPackChanges({});
+        setPackSyncStatus(`已用本机清单更新云端 ${packNowLabel()}`,'ok');
+      }else{
+        setPackSyncStatus('本机没有可上传的行李改动','err');
+      }
+      return true;
+    }
     if(payload.mode==='push'){
       setPackSyncStatus('正在保存手机清单到云端…','pending');
       const pending=normalizePackPendingObject(payload.pending||{},payload.createdAt).changes;
@@ -673,6 +698,31 @@ async function flushPackCloudPending(){
     return false;
   }finally{
     PACK_SYNC.flushing=false;
+  }
+}
+async function replacePackCloudWithLocal(manual){
+  if(!STATE.packing||!STATE.packing.length) return;
+  const localItems=readLocalPackState();
+  if(!Object.keys(localItems).length){
+    setPackSyncStatus('本机没有可上传的行李改动','err');
+    return;
+  }
+  if(manual&&!confirm('这会以本机行李清单覆盖云端，另一台手机下次同步会跟随。本机确定是最新版才继续。')) return;
+  if(packCanUseBridge()){
+    setPackSyncStatus('正在转到云端覆盖…','pending');
+    location.href=packCloudbaseSyncUrl('replace');
+    return;
+  }
+  setPackSyncStatus('正在用本机清单更新云端…','pending');
+  try{
+    await ensurePackCloud();
+    const data=await saveCloudPackState(makeCloudPackStateFromLocalItems(localItems,packIsoNow(),packDeviceId()));
+    applyCloudPackState(data.items||{},true);
+    savePendingPackChanges({});
+    setPackSyncStatus(`已用本机清单更新云端 ${packNowLabel()}`,'ok');
+  }catch(e){
+    console.warn('[pack-sync] replace failed', e);
+    setPackSyncStatus(packSyncErrorText(e,'云同步暂不可用，本机可继续改'),'err');
   }
 }
 async function syncPackCloudNow(manual){
@@ -988,7 +1038,7 @@ function renderTodos(){
     h+=`<div class="todo"><span class="bx">${t.done?'✅':'⬜'}</span><span>${esc(t.label)}</span></div>`;
   });
   if(STATE.packing&&STATE.packing.length){
-    h+='<div class="sec-title pack-title"><span>行李</span><span class="pack-actions"><button class="pack-sync-btn" id="pack-sync-now" type="button" title="立即同步行李清单" aria-label="立即同步行李清单">↻ 云同步</button><button class="pack-restore" id="pack-restore" type="button" title="恢复已删除行李项" aria-label="恢复已删除行李项">↺ <span id="pack-deleted-count"></span></button></span></div><div class="pack-sync-status" id="pack-sync-status"></div>';
+    h+='<div class="sec-title pack-title"><span>行李</span><span class="pack-actions"><button class="pack-sync-btn" id="pack-sync-now" type="button" title="立即同步行李清单" aria-label="立即同步行李清单">↻ 云同步</button><button class="pack-sync-btn" id="pack-push-local" type="button" title="以本机行李清单覆盖云端" aria-label="以本机行李清单覆盖云端">↑ 本机为准</button><button class="pack-restore" id="pack-restore" type="button" title="恢复已删除行李项" aria-label="恢复已删除行李项">↺ <span id="pack-deleted-count"></span></button></span></div><div class="pack-sync-status" id="pack-sync-status"></div>';
     STATE.packing.forEach((c,ci)=>{
       let rows='';
       (c.items||[]).forEach((it)=>{
@@ -1122,6 +1172,8 @@ function bindPackingChecks(){
   if(restore) restore.onclick=restoreDeletedPacking;
   const syncNow=$('pack-sync-now');
   if(syncNow) syncNow.onclick=()=>syncPackCloudNow(true);
+  const pushLocal=$('pack-push-local');
+  if(pushLocal) pushLocal.onclick=()=>replacePackCloudWithLocal(true);
   syncPackCounts();
   syncPackDeletedTools();
   paintPackSyncStatus();
