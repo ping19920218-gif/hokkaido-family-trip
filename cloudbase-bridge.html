@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>北海道行李清单云同步桥接</title>
+<script src="https://static.cloudbase.net/cloudbase-js-sdk/3.3.10/cloudbase.full.js"></script>
+<style>
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;padding:24px;color:#222;line-height:1.6}
+.box{max-width:420px;margin:auto}
+h1{font-size:18px;margin:0 0 10px}
+p{font-size:14px;color:#555;margin:0}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>云同步授权已打开</h1>
+  <p>请回到北海道行程页面，等待“已云同步”提示。</p>
+</div>
+<script>
+const CFG = {
+  env: 'baby-tracker-d6g6gqokjc671997c',
+  region: 'ap-shanghai',
+  fn: 'bt',
+  familyId: 'fam-huti',
+  familyCode: 'huti'
+};
+function isAllowedOrigin(origin){
+  return origin === 'https://ping19920218-gif.github.io'
+    || origin === 'https://baby-tracker-d6g6gqokjc671997c-1320742857.tcloudbaseapp.com'
+    || /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin||'');
+}
+let app = null;
+let readyPromise = null;
+async function ensureCloud(){
+  if(readyPromise) return readyPromise;
+  readyPromise = (async()=>{
+    if(!window.cloudbase) throw new Error('CloudBase SDK 未加载');
+    app = cloudbase.init({env:CFG.env,region:CFG.region});
+    const auth = app.auth({persistence:'local'});
+    let signedIn = false;
+    try{ signedIn = !!(auth.getLoginState ? await auth.getLoginState() : null); }catch(e){ signedIn = false; }
+    if(!signedIn){
+      const r = await auth.signInAnonymously();
+      if(r&&r.error) throw new Error('CloudBase 匿名登录失败：'+(r.error.message||r.error));
+    }
+  })().catch(e=>{ readyPromise=null; throw e; });
+  return readyPromise;
+}
+async function cloudCall(op, extra){
+  if(op !== 'getSetting' && op !== 'setSetting') throw new Error('Unsupported op: '+op);
+  await ensureCloud();
+  const data = {...(extra||{}), op, familyId:CFG.familyId, familyCode:CFG.familyCode};
+  const res = await app.callFunction({name:CFG.fn, data});
+  const r = res && res.result;
+  if(!r) throw new Error(`云函数无响应（${op}）`);
+  if(r.error) throw new Error(`云端${op}失败：${r.error}`);
+  return r.data || {};
+}
+function reply(source, origin, payload){
+  try{ source && source.postMessage(payload, origin); }catch(e){}
+}
+function notifyReady(source, origin){
+  reply(source, origin || '*', {type:'pack-cloud-bridge-ready'});
+}
+window.addEventListener('message', async (event)=>{
+  if(!isAllowedOrigin(event.origin)) return;
+  const msg = event.data || {};
+  if(msg && msg.type === 'pack-cloud-bridge-ping'){
+    notifyReady(event.source, event.origin);
+    return;
+  }
+  if(!msg || msg.type !== 'pack-cloud-call' || !msg.id) return;
+  try{
+    const data = await cloudCall(msg.op, msg.extra || {});
+    reply(event.source, event.origin, {type:'pack-cloud-response', id:msg.id, ok:true, data});
+  }catch(e){
+    reply(event.source, event.origin, {
+      type:'pack-cloud-response',
+      id:msg.id,
+      ok:false,
+      error:{name:(e&&e.name)||'Error', message:(e&&e.message)||String(e)}
+    });
+  }
+});
+if(window.parent && window.parent !== window) notifyReady(window.parent, '*');
+if(window.opener) notifyReady(window.opener, '*');
+</script>
+</body>
+</html>

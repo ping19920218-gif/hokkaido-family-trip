@@ -151,9 +151,11 @@ const PACK_SYNC_CFG = {
   familyCode: 'huti',
   settingKey: 'packingHokkaido2026Json'
 };
+const PACK_BRIDGE_URL = 'https://baby-tracker-d6g6gqokjc671997c-1320742857.tcloudbaseapp.com/hokkaido-family-trip/cloudbase-bridge.html';
+const PACK_BRIDGE_ORIGIN = (()=>{try{return new URL(PACK_BRIDGE_URL).origin;}catch(e){return '';}})();
 const PACK_PENDING_KEY = 'hokkaido-pack-sync-pending';
 const PACK_DEVICE_KEY = 'hokkaido-pack-device';
-const PACK_SYNC = {app:null, ready:false, starting:null, applying:false, flushing:false, timer:null, status:'正在连接云同步…', level:''};
+const PACK_SYNC = {app:null, ready:false, starting:null, bridge:null, bridgeWindow:null, bridgeReady:false, bridgeStarting:null, bridgeSeq:0, bridgePreferred:false, applying:false, flushing:false, timer:null, status:'正在连接云同步…', level:''};
 
 function packDeviceId(){
   try{
@@ -231,6 +233,36 @@ function setPackSyncStatus(text,level){
   PACK_SYNC.level=level||'';
   paintPackSyncStatus();
 }
+function packCanUseBridge(){
+  return !!PACK_BRIDGE_ORIGIN && location.origin !== PACK_BRIDGE_ORIGIN;
+}
+function packBridgeTarget(){
+  if(PACK_SYNC.bridgeWindow && !PACK_SYNC.bridgeWindow.closed) return PACK_SYNC.bridgeWindow;
+  if(PACK_SYNC.bridge && PACK_SYNC.bridge.contentWindow) return PACK_SYNC.bridge.contentWindow;
+  return null;
+}
+function preparePackBridgeInteractive(){
+  if(!packCanUseBridge() || PACK_SYNC.bridgeReady) return;
+  if(PACK_SYNC.bridgeWindow && !PACK_SYNC.bridgeWindow.closed){
+    try{ PACK_SYNC.bridgeWindow.focus(); }catch(e){}
+    return;
+  }
+  try{
+    PACK_SYNC.bridgeWindow=window.open(
+      PACK_BRIDGE_URL+'?v=90&mode=popup&ts='+Date.now(),
+      'hokkaidoPackCloudBridge',
+      'popup,width=430,height=620'
+    );
+    if(PACK_SYNC.bridgeWindow) PACK_SYNC.bridgeWindow.focus();
+  }catch(e){
+    console.warn('[pack-sync] popup bridge failed', e);
+  }
+}
+function packSyncErrorText(e, fallback){
+  const msg=String((e&&e.message)||e||'');
+  if(msg.includes('云同步桥接超时') || msg.includes('云同步授权页') || msg.includes('弹窗')) return '先打开云同步授权页，再点同步';
+  return fallback;
+}
 async function ensurePackCloud(){
   if(PACK_SYNC.ready) return;
   if(PACK_SYNC.starting) return PACK_SYNC.starting;
@@ -248,16 +280,97 @@ async function ensurePackCloud(){
   })().catch(e=>{ PACK_SYNC.starting=null; throw e; });
   return PACK_SYNC.starting;
 }
-async function packCloudCall(op,extra){
-  await ensurePackCloud();
-  const res=await PACK_SYNC.app.callFunction({
-    name:PACK_SYNC_CFG.fn,
-    data:{op,familyId:PACK_SYNC_CFG.familyId,familyCode:PACK_SYNC_CFG.familyCode,...(extra||{})}
+async function ensurePackBridge(){
+  if(!packCanUseBridge()) throw new Error('当前页面不需要云同步桥接');
+  if(PACK_SYNC.bridgeReady && packBridgeTarget()) return;
+  if(PACK_SYNC.bridgeStarting) return PACK_SYNC.bridgeStarting;
+  PACK_SYNC.bridgeStarting = new Promise((resolve,reject)=>{
+    let done=false;
+    let timer=null;
+    const hasPopup=!!(PACK_SYNC.bridgeWindow && !PACK_SYNC.bridgeWindow.closed);
+    const cleanup=()=>{
+      if(timer) clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+    };
+    const onMessage=(event)=>{
+      if(event.origin!==PACK_BRIDGE_ORIGIN) return;
+      const msg=event.data||{};
+      if(msg.type!=='pack-cloud-bridge-ready') return;
+      done=true;
+      cleanup();
+      PACK_SYNC.bridgeReady=true;
+      resolve();
+    };
+    window.addEventListener('message', onMessage);
+    if(hasPopup){
+      try{ PACK_SYNC.bridgeWindow.postMessage({type:'pack-cloud-bridge-ping'}, PACK_BRIDGE_ORIGIN); }catch(e){}
+    }else{
+      let frame=PACK_SYNC.bridge;
+      if(!frame || !frame.contentWindow){
+        frame=document.createElement('iframe');
+        frame.setAttribute('aria-hidden','true');
+        frame.style.cssText='position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+        document.body.appendChild(frame);
+        PACK_SYNC.bridge=frame;
+      }
+      frame.src=PACK_BRIDGE_URL+'?v=90&ts='+Date.now();
+    }
+    timer=setTimeout(()=>{
+      if(done) return;
+      cleanup();
+      PACK_SYNC.bridgeStarting=null;
+      reject(new Error(hasPopup ? '云同步桥接超时，请在弹窗里点“确定访问”后回到本页' : '云同步桥接超时，请先打开云同步授权页点“确定访问”'));
+    },hasPopup?45000:12000);
+  }).catch(e=>{ PACK_SYNC.bridgeReady=false; throw e; });
+  return PACK_SYNC.bridgeStarting;
+}
+async function packBridgeCall(op, extra){
+  await ensurePackBridge();
+  const target=packBridgeTarget();
+  if(!target) throw new Error('云同步桥接未连接');
+  const id='pack-'+(++PACK_SYNC.bridgeSeq)+'-'+Date.now().toString(36);
+  return new Promise((resolve,reject)=>{
+    let timer=null;
+    const cleanup=()=>{
+      if(timer) clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+    };
+    const onMessage=(event)=>{
+      if(event.origin!==PACK_BRIDGE_ORIGIN) return;
+      const msg=event.data||{};
+      if(msg.type!=='pack-cloud-response' || msg.id!==id) return;
+      cleanup();
+      if(msg.ok) resolve(msg.data||{});
+      else reject(new Error((msg.error&&msg.error.message)||'云同步桥接失败'));
+    };
+    window.addEventListener('message', onMessage);
+    timer=setTimeout(()=>{
+      cleanup();
+      reject(new Error('云同步桥接超时，请先打开云同步授权页点“确定访问”'));
+    },15000);
+    target.postMessage({type:'pack-cloud-call', id, op, extra:extra||{}}, PACK_BRIDGE_ORIGIN);
   });
-  const r=res&&res.result;
-  if(!r) throw new Error(`云函数无响应（${op}）`);
-  if(r.error) throw new Error(`云端${op}失败：${r.error}`);
-  return r.data||{};
+}
+async function packCloudCall(op,extra){
+  if(PACK_SYNC.bridgePreferred && packCanUseBridge()) return packBridgeCall(op,extra);
+  try{
+    await ensurePackCloud();
+    const res=await PACK_SYNC.app.callFunction({
+      name:PACK_SYNC_CFG.fn,
+      data:{op,familyId:PACK_SYNC_CFG.familyId,familyCode:PACK_SYNC_CFG.familyCode,...(extra||{})}
+    });
+    const r=res&&res.result;
+    if(!r) throw new Error(`云函数无响应（${op}）`);
+    if(r.error) throw new Error(`云端${op}失败：${r.error}`);
+    return r.data||{};
+  }catch(e){
+    if(packCanUseBridge()){
+      console.warn('[pack-sync] direct cloud call failed, using bridge', e);
+      PACK_SYNC.bridgePreferred=true;
+      return packBridgeCall(op,extra);
+    }
+    throw e;
+  }
 }
 async function fetchCloudPackState(){
   const data=await packCloudCall('getSetting',{key:PACK_SYNC_CFG.settingKey});
@@ -336,7 +449,7 @@ async function flushPackCloudPending(){
     return true;
   }catch(e){
     console.warn('[pack-sync] flush failed', e);
-    setPackSyncStatus('云同步暂不可用，本机已保存','err');
+    setPackSyncStatus(packSyncErrorText(e,'云同步暂不可用，本机已保存'),'err');
     return false;
   }finally{
     PACK_SYNC.flushing=false;
@@ -344,9 +457,12 @@ async function flushPackCloudPending(){
 }
 async function syncPackCloudNow(manual){
   if(!STATE.packing||!STATE.packing.length) return;
-  if(manual) setPackSyncStatus('正在同步…','pending');
+  if(manual){
+    setPackSyncStatus('正在同步…','pending');
+    preparePackBridgeInteractive();
+  }
   try{
-    await ensurePackCloud();
+    if(!packCanUseBridge()) await ensurePackCloud();
     const flushed=await flushPackCloudPending();
     if(!flushed) return;
     const data=await fetchCloudPackState();
@@ -361,7 +477,7 @@ async function syncPackCloudNow(manual){
     }
   }catch(e){
     console.warn('[pack-sync] sync failed', e);
-    setPackSyncStatus('云同步暂不可用，本机可继续改','err');
+    setPackSyncStatus(packSyncErrorText(e,'云同步暂不可用，本机可继续改'),'err');
   }
 }
 function startPackCloudSync(){
